@@ -54,6 +54,12 @@ var AlphaNumericMap = map[string]map[string]string{}
 // in the data set when anonymizing it.
 var UUIDMap = map[uuid.UUID]uuid.UUID{}
 
+// EmailCounter counts the number of unique emails generated
+var EmailCounter = 0
+
+// SlugCounter counts the number of unique slugs generated
+var SlugCounter = 0
+
 // init initializes the ProcessorCatalog map for all processors. A processor must be listed here to be accessible.
 func init() {
 	ProcessorCatalog = map[string]ProcessorFunc{
@@ -78,6 +84,8 @@ func init() {
 		"RandomDigits":          ProcessorRandomDigits,
 		"RandomUUID":            ProcessorRandomUUID,
 		"ScrubString":           ProcessorScrubString,
+		"SequentialEmail":       ProcessorSequentialEmail,
+		"SequentialSlug":        ProcessorSequentialSlug,
 	}
 
 }
@@ -138,6 +146,22 @@ func ProcessorCity(cmap *ColumnMapper, input string) (string, error) {
 // ProcessorEmailAddress will return an e-mail address that is >= 0.4 Jaro-Winkler similar than the input.
 func ProcessorEmailAddress(cmap *ColumnMapper, input string) (string, error) {
 	return fake.EmailAddress(), nil
+}
+
+// ProcessorSequentialEmail will return a unique email addressed suffixed by a number
+func ProcessorSequentialEmail(cmap *ColumnMapper, input string) (string, error) {
+	var email = fmt.Sprintf("email%d@domain.com", EmailCounter)
+	EmailCounter++
+
+	return email, nil
+}
+
+// ProcessorSequentialSlug will return a unique slug addressed suffixed by a number
+func ProcessorSequentialSlug(cmap *ColumnMapper, input string) (string, error) {
+	var slug = fmt.Sprintf("slug%d", SlugCounter)
+	SlugCounter++
+
+	return slug, nil
 }
 
 // ProcessorFirstName will return a first name that is >= 0.4 Jaro-Winkler similar than the input.
