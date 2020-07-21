@@ -74,12 +74,14 @@ func init() {
 		"FakeIPv4":              ProcessorIPv4,
 		"FakeLastName":          ProcessorLastName,
 		"FakePhoneNumber":       ProcessorPhoneNumber,
+		"FakeProduct":           ProcessorProduct,
 		"FakeState":             ProcessorState,
 		"FakeStateAbbrev":       ProcessorStateAbbrev,
 		"FakeUsername":          ProcessorUserName,
 		"FakeZip":               ProcessorZip,
 		"Identity":              ProcessorIdentity, // Default: Does not modify field
 		"RandomBoolean":         ProcessorRandomBoolean,
+		"RandomCharacters":      ProcessorRandomCharacters,
 		"RandomDate":            ProcessorRandomDate,
 		"RandomDigits":          ProcessorRandomDigits,
 		"RandomUUID":            ProcessorRandomUUID,
@@ -136,6 +138,11 @@ func ProcessorAlphaNumericScrambler(cmap *ColumnMapper, input string) (string, e
 // ProcessorAddress will return a fake address string that is compiled from the fake library
 func ProcessorAddress(cmap *ColumnMapper, input string) (string, error) {
 	return fake.StreetAddress(), nil
+}
+
+// ProcessorProduct will return a fake product name
+func ProcessorProduct(cmap *ColumnMapper, input string) (string, error) {
+	return fake.ProductName(), nil
 }
 
 // ProcessorCity will return a real city name that is >= 0.4 Jaro-Winkler similar than the input.
@@ -250,6 +257,11 @@ func ProcessorRandomDate(cmap *ColumnMapper, input string) (string, error) {
 	// NOTE: HIPAA only requires we scramble month and day, not year
 	scrambledDate := randomizeDate(year)
 	return scrambledDate, nil
+}
+
+// ProcessorRandomCharacters will return a random string of characters keeping the same length of the input
+func ProcessorRandomCharacters(cmap *ColumnMapper, input string) (string, error) {
+	return fake.CharactersN(len(input)), nil
 }
 
 // ProcessorRandomDigits will return a random string of digit(s) keeping the same length of the input.
