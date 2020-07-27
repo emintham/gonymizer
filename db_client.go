@@ -69,7 +69,7 @@ func GetAllProceduresInSchema(conf PGConfig, schema string) ([]string, error) {
 // GetAllSchemaColumns will return a row pointer to a list of table and column names for the given database connection.
 func GetAllSchemaColumns(db *sql.DB) (*sql.Rows, error) {
 	query := `
-			SELECT table_catalog, table_schema, table_name, column_name, data_type, ordinal_position,
+			SELECT table_catalog, table_schema, table_name, column_name, data_type, coalesce(character_maximum_length, 0) char_length, ordinal_position,
 			CASE
 			    WHEN is_nullable = 'YES' THEN
 			        TRUE
@@ -188,7 +188,7 @@ func GetSchemasInDatabase(conf PGConfig, excludeSchemas []string) ([]string, err
 // the provided schema (using the SQL equals operator).
 func GetSchemaColumnEquals(db *sql.DB, schema string) (*sql.Rows, error) {
 	rows, err := db.Query(`
-	SELECT table_catalog, table_schema, table_name, column_name, data_type, ordinal_position, 
+	SELECT table_catalog, table_schema, table_name, column_name, data_type, coalesce(character_maximum_length, 0) char_length, ordinal_position,
 			CASE
 			    WHEN is_nullable = 'YES' THEN
 			        TRUE
@@ -227,7 +227,7 @@ func GetSchemaColumnsLike(db *sql.DB, schemaPrefix string) (*sql.Rows, error) {
 
 	// Now grab all the columns from this schema
 	rows, err := db.Query(`
-			SELECT table_catalog, table_schema, table_name, column_name, data_type, ordinal_position, 
+			SELECT table_catalog, table_schema, table_name, column_name, data_type, coalesce(character_maximum_length, 0) char_length, ordinal_position,
 			CASE
 			    WHEN is_nullable = 'YES' THEN
 			        TRUE
@@ -335,8 +335,8 @@ func KillDatabaseConnections(db *sql.DB, dbName string) (err error) {
 	var success string
 
 	query := `
-	SELECT pg_terminate_backend(pid) 
-	FROM pg_stat_activity 
+	SELECT pg_terminate_backend(pid)
+	FROM pg_stat_activity
 	WHERE pid != pg_backend_pid()
 		AND datname = $1;`
 

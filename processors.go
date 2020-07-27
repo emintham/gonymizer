@@ -44,21 +44,40 @@ const numericSetLen = 10
 // in this map.
 var ProcessorCatalog map[string]ProcessorFunc
 
-// AlphaNumericMap is used to keep consistency with scrambled alpha numeric strings.
+// alphaNumericMap is used to keep consistency with scrambled alpha numeric strings.
 // For example, if we need to scramble things such as Social Security Numbers, but it is nice to keep track of these
 // changes so if we run across the same SSN again we can scramble it to what we already have.
-var AlphaNumericMap = map[string]map[string]string{}
+var alphaNumericMap = safeAlphaNumericMap{}
 
-// UUIDMap is the Global UUID map for all UUIDs that we anonymize. Similar to AlphaNumericMap this map contains all
+// uuidMap is the Global UUID map for all UUIDs that we anonymize. Similar to alphaNumericMap this map contains all
 // UUIDs and what they are changed to. Some tables use UUIDs as the primary key and this allows us to keep consistency
 // in the data set when anonymizing it.
-var UUIDMap = map[uuid.UUID]uuid.UUID{}
+var uuidMap = safeUUIDMap{}
 
-// EmailCounter counts the number of unique emails generated
-var EmailCounter = 0
+// instanceCounts counts the number of random instances generated indexed by schema
+var instanceCounts = safeCounter{v: make(map[string]int)}
 
-// SlugCounter counts the number of unique slugs generated
-var SlugCounter = 0
+// truncateHead truncates a given string to a given max length by removing from the beginning
+func truncateHead(input string, max int) string {
+	runeSlice := []rune(input)
+	length := len(runeSlice)
+
+	if length > max {
+		a := length - max
+		return string(runeSlice[a:])
+	}
+
+	return input
+}
+
+// truncate reduces a string to satisfy constraints of a column's data type
+func truncate(input string, cmap *ColumnMapper) string {
+	if cmap.DataType == "character varying" {
+		return truncateHead(input, cmap.MaxLength)
+	}
+
+	return input
+}
 
 // init initializes the ProcessorCatalog map for all processors. A processor must be listed here to be accessible.
 func init() {
@@ -100,39 +119,18 @@ type ProcessorFunc func(*ColumnMapper, string) (string, error)
 
 // ProcessorAlphaNumericScrambler will receive the column metadata via ColumnMap and the column's actual data via the
 // input string. The processor will scramble all alphanumeric digits and characters, but it will leave all
-// non-alphanumerics the same without modification. These values are globally mapped and use the AlphaNumericMap to
+// non-alphanumerics the same without modification. These values are globally mapped and use the alphaNumericMap to
 // remap values once they are seen more than once.
 //
 // Example:
 // "PUI-7x9vY" = ProcessorAlphaNumericScrambler("ABC-1a2bC")
 func ProcessorAlphaNumericScrambler(cmap *ColumnMapper, input string) (string, error) {
-	var (
-		err       error
-		scramble  string
-		parentKey string
-	)
-
-	// Build the parent key which will be used for mapping columns to each other. Useful for PK/FK relationships
-	parentKey = fmt.Sprintf("%s.%s.%s", cmap.ParentSchema, cmap.ParentTable, cmap.ParentColumn)
-
-	// Check to see if we are working on a mapped column
 	if cmap.ParentSchema != "" && cmap.ParentTable != "" && cmap.ParentColumn != "" {
-		// Check to see if value already exists in AlphaNumericMap
-		if len(AlphaNumericMap[parentKey]) < 1 {
-			AlphaNumericMap[parentKey] = map[string]string{}
-		}
-		if len(AlphaNumericMap[parentKey][input]) < 1 {
-			scramble = scrambleString(input)
-			AlphaNumericMap[parentKey][input] = scramble
-		} else {
-			// Key already exists so use consistent value
-			scramble = AlphaNumericMap[parentKey][input]
-		}
+		parentKey := fmt.Sprintf("%s.%s.%s", cmap.ParentSchema, cmap.ParentTable, cmap.ParentColumn)
+		return alphaNumericMap.Get(parentKey, input)
 	} else {
-		scramble = scrambleString(input)
+		return scrambleString(input), nil
 	}
-
-	return scramble, err
 }
 
 // ProcessorAddress will return a fake address string that is compiled from the fake library
@@ -140,9 +138,12 @@ func ProcessorAddress(cmap *ColumnMapper, input string) (string, error) {
 	return fake.StreetAddress(), nil
 }
 
-// ProcessorProduct will return a fake product name
+// ProcessorProduct will return a fake product name followed by a sequential integer
 func ProcessorProduct(cmap *ColumnMapper, input string) (string, error) {
-	return fake.ProductName(), nil
+	key := cmap.TableName + cmap.ColumnName
+	counter := instanceCounts.Inc(key)
+	output := fmt.Sprintf("%s%d", fake.ProductName(), counter)
+	return truncate(output, cmap), nil
 }
 
 // ProcessorCity will return a real city name that is >= 0.4 Jaro-Winkler similar than the input.
@@ -157,16 +158,18 @@ func ProcessorEmailAddress(cmap *ColumnMapper, input string) (string, error) {
 
 // ProcessorSequentialEmail will return a unique email addressed suffixed by a number
 func ProcessorSequentialEmail(cmap *ColumnMapper, input string) (string, error) {
-	var email = fmt.Sprintf("email%d@domain.com", EmailCounter)
-	EmailCounter++
+	key := cmap.TableName + cmap.ColumnName
+	counter := instanceCounts.Inc(key)
+	var email = fmt.Sprintf("email%d@domain.com", counter)
 
 	return email, nil
 }
 
 // ProcessorSequentialSlug will return a unique slug addressed suffixed by a number
 func ProcessorSequentialSlug(cmap *ColumnMapper, input string) (string, error) {
-	var slug = fmt.Sprintf("slug%d", SlugCounter)
-	SlugCounter++
+	key := cmap.TableName + cmap.ColumnName
+	counter := instanceCounts.Inc(key)
+	var slug = fmt.Sprintf("slug%d", counter)
 
 	return slug, nil
 }
@@ -245,13 +248,13 @@ func ProcessorRandomDate(cmap *ColumnMapper, input string) (string, error) {
 	dateSplit := strings.Split(input, "-")
 
 	if len(dateSplit) < 3 || len(dateSplit) > 3 {
-		return "", fmt.Errorf("Date format is not ISO-8601: %q", dateSplit)
+		return "", fmt.Errorf("date format is not ISO-8601: %q", dateSplit)
 	}
 
 	// Parse Year
 	year, err := strconv.Atoi(dateSplit[0])
 	if err != nil {
-		return "", fmt.Errorf("Unable to parse year from date: %q", dateSplit)
+		return "", fmt.Errorf("unable to parse year from date: %q", dateSplit)
 	}
 
 	// NOTE: HIPAA only requires we scramble month and day, not year
@@ -261,7 +264,12 @@ func ProcessorRandomDate(cmap *ColumnMapper, input string) (string, error) {
 
 // ProcessorRandomCharacters will return a random string of characters keeping the same length of the input
 func ProcessorRandomCharacters(cmap *ColumnMapper, input string) (string, error) {
-	return fake.CharactersN(len(input)), nil
+	length := utf8.RuneCountInString(input)
+	key := cmap.TableName + cmap.ColumnName
+	counter := instanceCounts.Inc(key)
+	output := fmt.Sprintf("%s%d", fake.CharactersN(length), counter)
+
+	return truncate(output, cmap), nil
 }
 
 // ProcessorRandomDigits will return a random string of digit(s) keeping the same length of the input.
@@ -307,21 +315,7 @@ func jaroWinkler(input string, jwDistance float64, faker fakeFuncPtr) (output st
 // randomizeUUID creates a random UUID and adds it to the map of input->output. If input already exists it returns
 // the output that was previously calculated for input.
 func randomizeUUID(input uuid.UUID) (string, error) {
-	var (
-		finalUUID uuid.UUID
-		err       error
-	)
-
-	if _, ok := UUIDMap[input]; !ok {
-		finalUUID, err = uuid.NewRandom()
-		if err != nil {
-			return "", err
-		}
-		UUIDMap[input] = finalUUID
-	} else {
-		finalUUID = UUIDMap[input]
-	}
-	return finalUUID.String(), nil
+	return uuidMap.Get(input)
 }
 
 // randomizeDate randomizes a day and month for a given year. This function is leap year compatible.

@@ -120,8 +120,9 @@ func process(dumpFile, mapFile, processedDumpFile, preProcess, postProcess strin
 	}
 
 	log.Info("Processing dump file: ", dumpFile)
-	err = gonymizer.ProcessDumpFile(columnMap, dumpFile, processedDumpFile, preProcess,
-		postProcess, generateSeed)
+	inclusive := viper.GetBool("process.inclusive")
+	numWorkers := viper.GetInt("num-workers")
+	err = gonymizer.ProcessConcurrently(columnMap, dumpFile, processedDumpFile, inclusive, generateSeed, numWorkers, preProcess, postProcess)
 	if err != nil {
 		return err
 	}

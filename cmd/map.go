@@ -221,7 +221,7 @@ func runMap(
 	}
 
 	log.Info("Wrote skeleton file to: ", skeletonFile)
-	log.Info("Found ", len(skeleton.ColumnMaps), " columns in ", skeleton.DBName, ".public")
+	log.Info("Found ", len(skeleton.ColumnMapsAsMap), " columns in ", skeleton.DBName, ".public")
 
 	return nil
 

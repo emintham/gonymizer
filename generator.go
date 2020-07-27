@@ -10,6 +10,7 @@ import (
 	"io"
 	mathRand "math/rand"
 	"os"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -114,20 +115,8 @@ func CreateDumpFile(
 	return err
 }
 
-// ProcessDumpFile will process the supplied dump file according to the supplied database map file. GenerateSeed can
-// also be set to true which will inform the function to use Go's built-in random number generator.
-func ProcessDumpFile(mapper *DBMapper,
-	src,
-	dst,
-	preProcessFile,
-	postProcessFile string,
-	generateSeed bool,
-) error {
-
-	var (
-		inputLine  string
-		outputLine string
-	)
+// seedRNG seeds the RNG
+func seedRNG(mapper *DBMapper, generateSeed bool) error {
 	if generateSeed {
 		for {
 			randVal, err := generateRandomInt64()
@@ -146,6 +135,27 @@ func ProcessDumpFile(mapper *DBMapper,
 		}
 		log.Debugf("Using map file for seed value: %d", randVal)
 		mathRand.Seed(mapper.Seed)
+	}
+	return nil
+}
+
+// ProcessDumpFile will process the supplied dump file according to the supplied database map file. GenerateSeed can
+// also be set to true which will inform the function to use Go's built-in random number generator.
+func ProcessDumpFile(mapper *DBMapper,
+	src,
+	dst,
+	preProcessFile,
+	postProcessFile string,
+	generateSeed bool,
+) error {
+
+	var (
+		inputLine  string
+		outputLine string
+	)
+	err := seedRNG(mapper, generateSeed)
+	if err != nil {
+		return err
 	}
 
 	srcFile, err := os.Open(src)
@@ -391,18 +401,6 @@ func processValue(cmap *ColumnMapper, input string) (string, error) {
 	for i, procDef := range cmap.Processors {
 
 		pfunc := ProcessorCatalog[procDef.Name]
-
-		if pfunc == nil {
-			log.Error(err)
-			log.Error("Unknown Processor Name: ", procDef.Name)
-			log.Debug("i: ", i)
-			log.Debug("procDef: ", procDef)
-			log.Debug("cmap: ", cmap)
-			log.Debug("input: ", input)
-			return "", err
-
-		}
-
 		output, err = pfunc(cmap, input)
 		if err != nil {
 			log.Error(err)
@@ -417,23 +415,17 @@ func processValue(cmap *ColumnMapper, input string) (string, error) {
 
 // parseCopyLine will parse the /copy line in a PostgreSQL dump file
 func (curLine *LineState) parseCopyLine(inputLine string) {
-
-	spaceSplts := strings.Split(inputLine, " ")
-	schemaTableSplt := strings.Split(spaceSplts[1], ".")
+	pattern := `^COPY (?P<Schema>[a-zA-Z_]+)\.(?P<TableName>\w+) \((?P<Columns>.*)\) .*`
+	r := regexp.MustCompile(pattern)
+	submatch := r.FindStringSubmatch(inputLine)
+	if len(submatch) == 0 {
+		log.Fatal(fmt.Sprintf("Regex doesn't match: %s", inputLine))
+	}
 
 	curLine.IsRow = true
-	curLine.SchemaName = schemaTableSplt[0]
-	curLine.TableName = schemaTableSplt[1]
-
-	openSplts := strings.Split(inputLine, "(")
-	parensContent := openSplts[1]
-	closeSplits := strings.Split(parensContent, ")")
-	parensContent = closeSplits[0]
-	curLine.ColumnNames = strings.Split(parensContent, ",")
-
-	for i, v := range curLine.ColumnNames {
-		curLine.ColumnNames[i] = strings.TrimSpace(v)
-	}
+	curLine.SchemaName = submatch[1]
+	curLine.TableName = submatch[2]
+	curLine.ColumnNames = strings.Split(submatch[3], ", ")
 
 	debugLine := fmt.Sprintf(`
 ====================================================================================================================
@@ -453,7 +445,6 @@ func fileInjector(srcFileName string, dstFile *os.File) error {
 		return err
 	}
 	defer srcFile.Close()
-	srcBuf := bufio.NewReader(srcFile)
 
 	// Add the start tag to the destination file to indicate we are injecting another file into this one
 	startTag := fmt.Sprintf(`
@@ -466,21 +457,7 @@ func fileInjector(srcFileName string, dstFile *os.File) error {
 		return err
 	}
 
-	for {
-		inputLine, err := srcBuf.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				break
-			} else {
-				return err
-			}
-		}
-		// Copy data from the source file into processed dump file
-		_, err = dstFile.WriteString(inputLine)
-		if err != nil {
-			return nil
-		}
-	}
+	io.Copy(dstFile, srcFile)
 
 	// Add end tag to the destination file to indicate the injection is complete
 	endTag := fmt.Sprintf(`
@@ -505,13 +482,13 @@ func writeDebugMap() (err error) {
 	}
 	defer outputFile.Close()
 
-	for k, v := range UUIDMap {
+	for k, v := range uuidMap.v {
 		_, err = outputFile.WriteString(fmt.Sprintf("%s => %s\n", k, v))
 		if err != nil {
 			return err
 		}
 	}
-	for k1, v1 := range AlphaNumericMap {
+	for k1, v1 := range alphaNumericMap.v {
 		_, err = outputFile.WriteString(fmt.Sprintf("\n=================\n%s\n=================\n", k1))
 		if err != nil {
 			return err

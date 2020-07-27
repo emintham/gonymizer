@@ -30,6 +30,7 @@ type ColumnMapper struct {
 	TableName       string
 	ColumnName      string
 	DataType        string
+	MaxLength       int
 	ParentSchema    string
 	ParentTable     string
 	ParentColumn    string
@@ -43,50 +44,61 @@ type ColumnMapper struct {
 // DBMapper is the main structure for the map file JSON object and is used to map all database columns that will be
 // anonymized.
 type DBMapper struct {
-	DBName       string
-	SchemaPrefix string
-	Seed         int64
-	ColumnMaps   []ColumnMapper
+	DBName          string
+	SchemaPrefix    string
+	Seed            int64
+	ColumnMapsAsMap map[string]ColumnMapper `json:"-"`
+	ColumnMaps      []ColumnMapper
+}
+
+func (m *DBMapper) PopulateColumnMaps() {
+	m.ColumnMaps = make([]ColumnMapper, 0, len(m.ColumnMapsAsMap))
+	for _, v := range m.ColumnMapsAsMap {
+		m.ColumnMaps = append(m.ColumnMaps, v)
+	}
+}
+
+func (m *DBMapper) PopulateColumnMapsAsMap() {
+	m.ColumnMapsAsMap = map[string]ColumnMapper{}
+
+	for _, cmap := range m.ColumnMaps {
+		key := fmt.Sprintf("%s|%s|%s", cmap.TableSchema, cmap.TableName, cmap.ColumnName)
+		m.ColumnMapsAsMap[key] = cmap
+	}
+}
+
+// normalizeName removes " from names
+// Some names may contain quotes if the name is a reserved word. For example tableName public.order would be a
+// conflict with ORDER BY so PSQL will add quotes to the name. I.E. public."order". Remove the quotes so we can match
+// whatever is in the map file.
+func normalizeName(name string) string {
+	return strings.Replace(name, "\"", "", -1)
 }
 
 // ColumnMapper returns the address of the ColumnMapper object if it matches the given parameters otherwise it returns
 // nil. Special cases exist for sharded schemas using the schema-prefix. See documentation for details.
 func (dbMap DBMapper) ColumnMapper(schemaName, tableName, columnName string) *ColumnMapper {
 
-	// Some names may contain quotes if the name is a reserved word. For example tableName public.order would be a
-	// conflict with ORDER BY so PSQL will add quotes to the name. I.E. public."order". Remove the quotes so we can match
-	// whatever is in the map file.
-	if strings.Contains(schemaName, "\"") {
-		schemaName = strings.Replace(schemaName, "\"", "", -1)
-	}
-	if strings.Contains(tableName, "\"") {
-		tableName = strings.Replace(tableName, "\"", "", -1)
-	}
-	if strings.Contains(columnName, "\"") {
-		columnName = strings.Replace(columnName, "\"", "", -1)
-	}
-	for _, cmap := range dbMap.ColumnMaps {
-		//log.Infoln("dbMap.SchemaPrefix-> ", dbMap.SchemaPrefix)
-		//log.Infoln("schemaName-> ", schemaName)
+	schemaName = normalizeName(schemaName)
+	tableName = normalizeName(tableName)
+	columnName = normalizeName(columnName)
 
-		if len(dbMap.SchemaPrefix) > 0 && strings.HasPrefix(schemaName, dbMap.SchemaPrefix) && cmap.TableName == tableName &&
-			cmap.ColumnName == columnName {
-			return &cmap
-		} else if cmap.TableSchema == schemaName && cmap.TableName == tableName && cmap.ColumnName == columnName {
-			return &cmap
-		}
+	key := fmt.Sprintf("%s|%s|%s", schemaName, tableName, columnName)
+	columnMapper, ok := dbMap.ColumnMapsAsMap[key]
+	if !ok {
+		return nil
 	}
-	return nil
+
+	return &columnMapper
 }
 
 // Validate is used to verify that a database map is complete and correct.
 func (dbMap *DBMapper) Validate() error {
 	if len(dbMap.DBName) == 0 {
-		return errors.New("Expected non-empty DBName")
+		return errors.New("expected non-empty DBName")
 	}
-
 	// Ensure that each processor is defined
-	for _, columnMap := range dbMap.ColumnMaps {
+	for _, columnMap := range dbMap.ColumnMapsAsMap {
 		for _, processor := range columnMap.Processors {
 			if _, ok := ProcessorCatalog[processor.Name]; !ok {
 				return fmt.Errorf("Unrecognized Processor %s", processor.Name)
@@ -98,21 +110,17 @@ func (dbMap *DBMapper) Validate() error {
 
 // GenerateConfigSkeleton will generate a column-map based on the supplied PGConfig and previously configured map file.
 func GenerateConfigSkeleton(conf PGConfig, schemaPrefix string, schemas, excludeTables []string) (*DBMapper, error) {
-	var (
-		dbmap     *DBMapper
-		columnMap []ColumnMapper
-	)
 	db, err := OpenDB(conf)
 	if err != nil {
 		log.Error(err)
 		return nil, err
 	}
 
-	dbmap = new(DBMapper)
-	dbmap.DBName = conf.DefaultDBName
-	dbmap.SchemaPrefix = schemaPrefix
+	dbMapper := new(DBMapper)
+	dbMapper.DBName = conf.DefaultDBName
+	dbMapper.SchemaPrefix = schemaPrefix
 
-	columnMap = []ColumnMapper{}
+	columnMap := map[string]ColumnMapper{}
 
 	if len(schemas) < 1 {
 		schemas = append(schemas, "public")
@@ -126,12 +134,12 @@ func GenerateConfigSkeleton(conf PGConfig, schemaPrefix string, schemas, exclude
 			return nil, err
 		}
 	}
-	dbmap.ColumnMaps = columnMap
-	return dbmap, nil
+	dbMapper.ColumnMapsAsMap = columnMap
+	return dbMapper, nil
 }
 
 // WriteConfigSkeleton will save the supplied DBMap to filepath.
-func WriteConfigSkeleton(dbmap *DBMapper, filepath string) error {
+func WriteConfigSkeleton(dbMapper *DBMapper, filepath string) error {
 
 	f, err := os.Create(filepath)
 	if err != nil {
@@ -144,7 +152,8 @@ func WriteConfigSkeleton(dbmap *DBMapper, filepath string) error {
 	jsonEncoder := json.NewEncoder(f)
 	jsonEncoder.SetIndent("", "    ")
 
-	err = jsonEncoder.Encode(dbmap)
+	dbMapper.PopulateColumnMaps()
+	err = jsonEncoder.Encode(dbMapper)
 	if err != nil {
 		log.Error(err)
 		log.Error("filepath", filepath)
@@ -169,8 +178,8 @@ func LoadConfigSkeleton(givenPathToFile string) (*DBMapper, error) {
 
 	jsonDecoder := json.NewDecoder(f)
 
-	dbmap := new(DBMapper)
-	err = jsonDecoder.Decode(dbmap)
+	dbMapper := new(DBMapper)
+	err = jsonDecoder.Decode(dbMapper)
 	if err != nil {
 		log.Error(err)
 		log.Error("givenPathToFile: ", givenPathToFile)
@@ -179,38 +188,33 @@ func LoadConfigSkeleton(givenPathToFile string) (*DBMapper, error) {
 		return nil, err
 	}
 
-	err = dbmap.Validate()
+	dbMapper.PopulateColumnMapsAsMap()
+	err = dbMapper.Validate()
 	if err != nil {
 		log.Error(err)
-		log.Error("dbmap: ", dbmap)
+		log.Error("dbMapper: ", dbMapper)
 		return nil, err
 	}
 
-	return dbmap, nil
+	return dbMapper, nil
 }
 
-// findColumn searches the in-memory loaded column map using the specified parameters.
-func findColumn(columns []ColumnMapper, columnName, tableName, schemaPrefix, schema,
-	dataType string) (col ColumnMapper) {
-
-	for _, col = range columns {
-
-		// Regular Column
-		if col.ColumnName == columnName && col.TableName == tableName && col.TableSchema == schema &&
-			col.DataType == dataType {
-			return col
-
-			// Sharded Column
-		} else if col.ColumnName == columnName && col.TableName == tableName && col.TableSchema == schemaPrefix+"*" &&
-			col.DataType == dataType {
-			return col
-		}
+// addColumnIfNotExists searches for columnName in columns, if the column exists in the dbMapper leave as-is otherwise create a
+// new one and add to the column map. Returns true if a column map was added
+func addColumnIfNotExists(columns map[string]ColumnMapper, columnName, tableName, schemaPrefix, schema, dataType string, maxLength, ordinalPosition int, isNullable bool) bool {
+	key := fmt.Sprintf("%s|%s|%s", schema, tableName, columnName)
+	_, ok := columns[key]
+	if !ok {
+		key = fmt.Sprintf("%s|%s|%s", schema, tableName, columnName)
+		columns[key] = NewColumnMapper(columnName, tableName, schema, dataType, maxLength, ordinalPosition, isNullable)
+		return true
 	}
-	return ColumnMapper{}
+
+	return false
 }
 
-// addColumn creates a ColumnMapper structure based on the input parameters.
-func addColumn(columnName, tableName, schema, dataType string, ordinalPosition int,
+// NewColumnMapper creates a new ColumnMapper
+func NewColumnMapper(columnName, tableName, schema, dataType string, maxLength, ordinalPosition int,
 	isNullable bool) ColumnMapper {
 	col := ColumnMapper{}
 
@@ -222,6 +226,7 @@ func addColumn(columnName, tableName, schema, dataType string, ordinalPosition i
 	col.TableName = tableName
 	col.ColumnName = columnName
 	col.DataType = dataType
+	col.MaxLength = maxLength
 	col.OrdinalPosition = ordinalPosition
 	col.IsNullable = isNullable
 	col.TableSchema = schema
@@ -230,8 +235,8 @@ func addColumn(columnName, tableName, schema, dataType string, ordinalPosition i
 }
 
 // mapColumns
-func mapColumns(db *sql.DB, columns []ColumnMapper, schemaPrefix, schema string,
-	excludeTables []string) ([]ColumnMapper, error) {
+func mapColumns(db *sql.DB, columns map[string]ColumnMapper, schemaPrefix, schema string,
+	excludeTables []string) (map[string]ColumnMapper, error) {
 	var (
 		err           error
 		rows          *sql.Rows
@@ -270,7 +275,7 @@ func mapColumns(db *sql.DB, columns []ColumnMapper, schemaPrefix, schema string,
 	} else if schemaPrefix != "" && schema == "" {
 
 		// Invalid
-		return nil, errors.New("You cannot use SchemaPrefix option without a schema to map it to")
+		return nil, errors.New("cannot use SchemaPrefix option without a schema to map it to")
 
 	} else if strings.HasPrefix(schemaPrefix, schema) {
 
@@ -294,10 +299,10 @@ func mapColumns(db *sql.DB, columns []ColumnMapper, schemaPrefix, schema string,
 			tableName       string
 			columnName      string
 			dataType        string
+			maxLength       int
 			ordinalPosition int
 			isNullable      bool
 			exclude         bool
-			col             ColumnMapper
 		)
 
 		// Iterate through each row and add the columns
@@ -308,6 +313,7 @@ func mapColumns(db *sql.DB, columns []ColumnMapper, schemaPrefix, schema string,
 				&tableName,
 				&columnName,
 				&dataType,
+				&maxLength,
 				&ordinalPosition,
 				&isNullable,
 			)
@@ -332,14 +338,7 @@ func mapColumns(db *sql.DB, columns []ColumnMapper, schemaPrefix, schema string,
 				continue
 			}
 
-			// Search for columnName in columns, if the column exists in the dbmap leave as-is otherwise create a new one and
-			// add to the column map
-			col = findColumn(columns, columnName, tableName, schemaPrefix, schema, dataType)
-			if col.TableSchema == "" && col.ColumnName == "" {
-				col = addColumn(columnName, tableName, schema, dataType, ordinalPosition, isNullable)
-				// Continuously append into the column map (old and new together)
-				columns = append(columns, col)
-			}
+			addColumnIfNotExists(columns, columnName, tableName, schemaPrefix, schema, dataType, maxLength, ordinalPosition, isNullable)
 		}
 
 		if !rows.NextResultSet() {
