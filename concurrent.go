@@ -13,19 +13,22 @@ import (
 	"unicode"
 )
 
-// maxLinesPerChunk bounds the number of lines per chunk. If no schema is found within maxLinesPerChunk, more lines are
-// consumed until a schema is found.
+// maxLinesPerChunk bounds the number of lines per chunk.
 const maxLinesPerChunk = 100000
 
 // Chunk is a section of Postgres' data dump together with metadata.
 type Chunk struct {
 	Data           *strings.Builder
-	ChunkNumber    int
-	SubChunkNumber int
-	NumLines       int
 	SchemaName     string
 	TableName      string
 	ColumnNames    []string
+	ChunkNumber    int
+	// SubChunkNumber is usually 0, but if data is split across multiple chunks for the same schema, the ChunkNumber
+	// will be the same across each chunk but with SubChunkNumbers in increasing order.
+	SubChunkNumber int
+	// number of lines included in the chunk
+	NumLines       int
+	// the line number starting from which actual table data is defined.
 	DataBegins     int
 }
 
@@ -85,7 +88,7 @@ func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup)
 	chunkCount := 0
 	subchunkCount := 0
 	eof := false
-	foundSchema := false
+	hasSubchunk := false
 
 	for {
 		var builder strings.Builder
@@ -132,7 +135,7 @@ func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup)
 				chunk.ColumnNames = columnNames
 				chunk.DataBegins = numLines
 
-				foundSchema = true
+				hasSubchunk = true
 			}
 
 			if strings.HasPrefix(trimmedInput, StateChangeTokenEndCopy) {
@@ -140,17 +143,14 @@ func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup)
 				schemaName = ""
 				tableName = ""
 				columnNames = nil
-				foundSchema = false
+				hasSubchunk = false
 				break
 			}
 
 			if numLines >= maxLinesPerChunk {
-				// Chunk is maxed out but no schema found yet, continue
-				if !foundSchema {
-					continue
+				if hasSubchunk {
+					subchunkCount++
 				}
-				// Already found a schema previously, stop this chunk
-				subchunkCount++
 				break
 			}
 		}
