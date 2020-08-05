@@ -18,18 +18,18 @@ const maxLinesPerChunk = 100000
 
 // Chunk is a section of Postgres' data dump together with metadata.
 type Chunk struct {
-	Data           *strings.Builder
-	SchemaName     string
-	TableName      string
-	ColumnNames    []string
-	ChunkNumber    int
+	Data        *strings.Builder
+	SchemaName  string
+	TableName   string
+	ColumnNames []string
+	ChunkNumber int
 	// SubChunkNumber is usually 0, but if data is split across multiple chunks for the same schema, the ChunkNumber
 	// will be the same across each chunk but with SubChunkNumbers in increasing order.
 	SubChunkNumber int
 	// number of lines included in the chunk
-	NumLines       int
+	NumLines int
 	// the line number starting from which actual table data is defined.
-	DataBegins     int
+	DataBegins int
 }
 
 // Filename returns a filename for a chunk.
@@ -54,11 +54,7 @@ func ProcessConcurrently(mapper *DBMapper, src, dst string, inclusive, generateS
 
 	var wg sync.WaitGroup
 	chunks := make(chan Chunk, numWorkers*2)
-	wg.Add(numWorkers)
-	for i := 0; i < numWorkers; i++ {
-		go startChunkWorker(chunks, &wg, mapper, inclusive)
-		log.Infof("Worker %d started!", i+1)
-	}
+	startChunkWorkers(mapper, &wg, numWorkers, chunks, inclusive)
 
 	reader := bufio.NewReader(srcFile)
 
@@ -71,6 +67,16 @@ func ProcessConcurrently(mapper *DBMapper, src, dst string, inclusive, generateS
 	return nil
 }
 
+// startChunkWorkers starts a number of workers to process chunks when they arrive in a given channel
+func startChunkWorkers(mapper *DBMapper, wg *sync.WaitGroup, numWorkers int, chunks <-chan Chunk, inclusive bool) {
+	wg.Add(numWorkers)
+
+	for i := 0; i < numWorkers; i++ {
+		go startChunkWorker(chunks, wg, mapper, inclusive)
+		log.Infof("Worker %d started!", i+1)
+	}
+}
+
 // createChunks takes a reader and splits it up into roughly maxLinesPerChunk sized pieces. These pieces are sent
 // through a channel.
 func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup) {
@@ -80,18 +86,21 @@ func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup)
 	wg.Add(1)
 
 	var (
-		schemaName  string
-		tableName   string
-		columnNames []string
+		schemaName    string
+		tableName     string
+		columnNames   []string
+		chunkCount    int
+		subchunkCount int
+		eof           bool
+		hasSubchunk   bool
 	)
 
-	chunkCount := 0
-	subchunkCount := 0
-	eof := false
-	hasSubchunk := false
+	for !eof {
+		var (
+			builder  strings.Builder
+			numLines int
+		)
 
-	for {
-		var builder strings.Builder
 		chunk := Chunk{
 			Data:           &builder,
 			ChunkNumber:    chunkCount,
@@ -100,11 +109,8 @@ func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup)
 			TableName:      tableName,
 			ColumnNames:    columnNames,
 		}
-		numLines := 0
 
-		for {
-			numLines++
-
+		for numLines = 1; numLines < maxLinesPerChunk; numLines++ {
 			input, err := reader.ReadString('\n')
 			if err != nil {
 				if err == io.EOF {
@@ -147,11 +153,10 @@ func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup)
 				break
 			}
 
-			if numLines >= maxLinesPerChunk {
+			if numLines == maxLinesPerChunk {
 				if hasSubchunk {
 					subchunkCount++
 				}
-				break
 			}
 		}
 
@@ -160,10 +165,6 @@ func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup)
 
 		if subchunkCount == 0 {
 			chunkCount++
-		}
-
-		if eof {
-			break
 		}
 	}
 
@@ -176,11 +177,12 @@ func mergeFiles(dst string, preProcessFile, postProcessFile string) error {
 	log.Info("Merging partial files...")
 
 	dstFile, err := os.Create(dst)
+	defer dstFile.Close()
+
 	if err != nil {
 		log.Error(err)
 		return err
 	}
-	defer dstFile.Close()
 
 	if len(preProcessFile) > 0 {
 		if err = fileInjector(preProcessFile, dstFile); err != nil {
@@ -234,6 +236,7 @@ func mergeFiles(dst string, preProcessFile, postProcessFile string) error {
 	return nil
 }
 
+// startChunkWorkers takes a receive-only channel of chunks and processes each chunk, writing them to file.
 // startChunkWorker takes a receive-only channel of chunks and processes each chunk, writing them to file.
 func startChunkWorker(chunks <-chan Chunk, wg *sync.WaitGroup, mapper *DBMapper, inclusive bool) {
 	defer wg.Done()
