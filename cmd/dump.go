@@ -208,8 +208,8 @@ func cliCommandDump(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	log.Info("🚜 ", aurora.Bold(aurora.Green("Creating dump file")), " 🚜")
-	err = dump(
+	log.Info(aurora.Bold(aurora.Green(" Creating dump file ")))
+	err = gonymizer.CreateDumpFile(
 		dbConf,
 		viper.GetString("dump.dump-file"),
 		viper.GetString("dump.schema-prefix"),
@@ -224,29 +224,8 @@ func cliCommandDump(cmd *cobra.Command, args []string) {
 		log.Error("❌ Gonymizer did not exit properly. See above for errors ❌")
 		os.Exit(1)
 	} else {
-		log.Info("🦄 ", aurora.Bold(aurora.Green("-- SUCCESS --")), " 🌈")
+		log.Info(aurora.Bold(aurora.Green(" -- SUCCESS -- ")))
 	}
-}
-
-// dump initiates the dump process.
-func dump(
-	conf gonymizer.PGConfig,
-	dumpFile,
-	schemaPrefix string,
-	excludeTable,
-	excludeTableData,
-	excludeSchemas,
-	schema []string,
-) (err error) {
-	return gonymizer.CreateDumpFile(
-		conf,
-		dumpFile,
-		schemaPrefix,
-		excludeTable,
-		excludeTableData,
-		excludeSchemas,
-		schema,
-	)
 }
 
 // storeRowCountFile stores the row counts for every table that was saved into the dump file. This can be used during

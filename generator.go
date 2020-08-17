@@ -399,7 +399,6 @@ func processValue(cmap *ColumnMapper, input string) (string, error) {
 	output := input
 
 	for i, procDef := range cmap.Processors {
-
 		pfunc := ProcessorCatalog[procDef.Name]
 		output, err = pfunc(cmap, input)
 		if err != nil {

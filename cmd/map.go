@@ -180,6 +180,20 @@ func cliCommandMap(cmd *cobra.Command, args []string) {
 	}
 }
 
+// createExcludeSet creates a set of strings that represent the tables/schemas that should be excluded from the dump.
+func createExcludeSet(excludeTable, excludeTableData []string) map[string]bool {
+	excludeTablesLocal := make(map[string]bool)
+
+	for _, exclude := range excludeTable {
+		excludeTablesLocal[exclude] = true
+	}
+
+	for _, exclude := range excludeTableData {
+		excludeTablesLocal[exclude] = true
+	}
+	return excludeTablesLocal
+}
+
 // runMap will map the database and update a configuration skeleton or create a new configuration skeleton.
 func runMap(
 	conf gonymizer.PGConfig,
@@ -189,12 +203,7 @@ func runMap(
 	excludeTableData,
 	schema []string,
 ) (err error) {
-	var (
-		skeleton *gonymizer.DBMapper
-	)
-
-	// Concatenate lists since we do not care for mapping sake
-	excludeTablesLocal := append(excludeTable, excludeTableData...)
+	excludeTablesLocal := createExcludeSet(excludeTable, excludeTableData)
 
 	if len(excludeTablesLocal) > 0 {
 		log.Info(aurora.Bold(aurora.Magenta("Excluding the following tables:")))
@@ -203,8 +212,8 @@ func runMap(
 		}
 	}
 
-	log.Info("🚜 ", aurora.Bold(aurora.Green("Creating map file")), " 🚜")
-	skeleton, err = gonymizer.GenerateConfigSkeleton(
+	log.Info(aurora.Bold(aurora.Green(" Creating map file ")))
+	skeleton, err := gonymizer.NewDBMapper(
 		conf,
 		schemaPrefix,
 		schema,
@@ -214,15 +223,14 @@ func runMap(
 		return err
 	}
 
-	skeletonFile := fmt.Sprint(mapFile + ".skeleton.json")
-	err = gonymizer.WriteConfigSkeleton(skeleton, skeletonFile)
+	filename := fmt.Sprint(mapFile + ".skeleton.json")
+	err = skeleton.WriteToFile(filename)
 	if err != nil {
 		return err
 	}
 
-	log.Info("Wrote skeleton file to: ", skeletonFile)
-	log.Info("Found ", len(skeleton.ColumnMapsAsMap), " columns in ", skeleton.DBName, ".public")
+	log.Info("Wrote skeleton file to: ", filename)
+	log.Infof("Found %d columns in %s.public", len(skeleton.ColumnMaps), skeleton.DBName)
 
 	return nil
-
 }

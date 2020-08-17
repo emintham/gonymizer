@@ -17,19 +17,19 @@ import (
 const maxLinesPerChunk = 100000
 
 // Chunk is a section of Postgres' data dump together with metadata.
+// SubChunkNumber: usually 0, but if data is split across multiple chunks for the same schema, the ChunkNumber
+// will be the same across each chunk but with SubChunkNumbers in increasing order.
+// DataBegins: the line number starting from which actual table data is defined.
 type Chunk struct {
-	Data        *strings.Builder
-	SchemaName  string
-	TableName   string
-	ColumnNames []string
-	ChunkNumber int
-	// SubChunkNumber is usually 0, but if data is split across multiple chunks for the same schema, the ChunkNumber
-	// will be the same across each chunk but with SubChunkNumbers in increasing order.
+	Data           *strings.Builder
+	SchemaName     string
+	TableName      string
+	ColumnNames    []string
+	ChunkNumber    int
 	SubChunkNumber int
-	// number of lines included in the chunk
-	NumLines int
-	// the line number starting from which actual table data is defined.
-	DataBegins int
+	NumLines       int
+	DataBegins     int
+	Inclusive      bool
 }
 
 // Filename returns a filename for a chunk.
@@ -39,47 +39,50 @@ func (c Chunk) Filename() string {
 
 // ProcessConcurrently will process the supplied dump file concurrently according to the supplied database map file.
 // generateSeed can also be set to true which will inform the function to use Go's built-in random number generator.
-func ProcessConcurrently(mapper *DBMapper, src, dst string, inclusive, generateSeed bool, numWorkers int, preProcessFile, postProcessFile string) error {
-	err := seedRNG(mapper, generateSeed)
+func ProcessConcurrently(config ProcessConfig) error {
+	err := seedRNG(config.DBMapper, config.GenerateSeed)
 	if err != nil {
 		return err
 	}
 
-	srcFile, err := os.Open(src)
+	srcFile, err := os.Open(config.SourceFilename)
 	if err != nil {
 		log.Error(err)
 		return err
 	}
 	defer srcFile.Close()
 
-	var wg sync.WaitGroup
-	chunks := make(chan Chunk, numWorkers*2)
-	startChunkWorkers(mapper, &wg, numWorkers, chunks, inclusive)
-
 	reader := bufio.NewReader(srcFile)
 
-	go createChunks(chunks, reader, &wg)
+	var wg sync.WaitGroup
+	chunks := make(chan Chunk, config.NumWorkers*2)
 
+	// Start 1 worker to pull out chunks from the file and put it on a channel of size 2*N
+	go createChunks(chunks, reader, &wg, config.Inclusive)
+
+	// Start N workers to read from the channel and process the chunks concurrently, writing results to file
+	startChunkWorkers(config.DBMapper, &wg, config.NumWorkers, chunks)
+
+	// Merge all partial results from file to final dst file, deleting the partial results
 	wg.Wait()
-
-	mergeFiles(dst, preProcessFile, postProcessFile)
+	mergeFiles(config)
 
 	return nil
 }
 
 // startChunkWorkers starts a number of workers to process chunks when they arrive in a given channel
-func startChunkWorkers(mapper *DBMapper, wg *sync.WaitGroup, numWorkers int, chunks <-chan Chunk, inclusive bool) {
+func startChunkWorkers(mapper *DBMapper, wg *sync.WaitGroup, numWorkers int, chunks <-chan Chunk) {
 	wg.Add(numWorkers)
 
 	for i := 0; i < numWorkers; i++ {
-		go startChunkWorker(chunks, wg, mapper, inclusive)
+		go startChunkWorker(chunks, wg, mapper)
 		log.Infof("Worker %d started!", i+1)
 	}
 }
 
 // createChunks takes a reader and splits it up into roughly maxLinesPerChunk sized pieces. These pieces are sent
 // through a channel.
-func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup) {
+func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup, inclusive bool) {
 	defer close(chunks)
 
 	defer wg.Done()
@@ -108,6 +111,7 @@ func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup)
 			SchemaName:     schemaName,
 			TableName:      tableName,
 			ColumnNames:    columnNames,
+			Inclusive:      inclusive,
 		}
 
 		for numLines = 1; numLines < maxLinesPerChunk; numLines++ {
@@ -153,10 +157,8 @@ func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup)
 				break
 			}
 
-			if numLines == maxLinesPerChunk {
-				if hasSubchunk {
-					subchunkCount++
-				}
+			if numLines == maxLinesPerChunk && hasSubchunk {
+				subchunkCount++
 			}
 		}
 
@@ -173,10 +175,10 @@ func createChunks(chunks chan<- Chunk, reader *bufio.Reader, wg *sync.WaitGroup)
 
 // mergeFiles takes a destination filename and pre/post-process files and writes all part files to the destination file
 // including any pre/post-processing file data.
-func mergeFiles(dst string, preProcessFile, postProcessFile string) error {
+func mergeFiles(config ProcessConfig) error {
 	log.Info("Merging partial files...")
 
-	dstFile, err := os.Create(dst)
+	dstFile, err := os.Create(config.DestinationFilename)
 	defer dstFile.Close()
 
 	if err != nil {
@@ -184,8 +186,8 @@ func mergeFiles(dst string, preProcessFile, postProcessFile string) error {
 		return err
 	}
 
-	if len(preProcessFile) > 0 {
-		if err = fileInjector(preProcessFile, dstFile); err != nil {
+	if len(config.PreprocessFilename) > 0 {
+		if err = fileInjector(config.PreprocessFilename, dstFile); err != nil {
 			log.Error("Unable to run preProcessor")
 			return err
 		}
@@ -223,8 +225,8 @@ func mergeFiles(dst string, preProcessFile, postProcessFile string) error {
 		os.Remove(filename)
 	}
 
-	if len(postProcessFile) > 0 {
-		if err = fileInjector(postProcessFile, dstFile); err != nil {
+	if len(config.PostprocessFilename) > 0 {
+		if err = fileInjector(config.PostprocessFilename, dstFile); err != nil {
 			return err
 		}
 	}
@@ -237,8 +239,7 @@ func mergeFiles(dst string, preProcessFile, postProcessFile string) error {
 }
 
 // startChunkWorkers takes a receive-only channel of chunks and processes each chunk, writing them to file.
-// startChunkWorker takes a receive-only channel of chunks and processes each chunk, writing them to file.
-func startChunkWorker(chunks <-chan Chunk, wg *sync.WaitGroup, mapper *DBMapper, inclusive bool) {
+func startChunkWorker(chunks <-chan Chunk, wg *sync.WaitGroup, mapper *DBMapper) {
 	defer wg.Done()
 
 	for chunk := range chunks {
@@ -272,7 +273,7 @@ func startChunkWorker(chunks <-chan Chunk, wg *sync.WaitGroup, mapper *DBMapper,
 				continue
 			}
 
-			output := processRowFromChunk(mapper, input, chunk.SchemaName, chunk.TableName, chunk.ColumnNames, inclusive)
+			output := processRowFromChunk(mapper, input, chunk)
 			dstFile.WriteString(output)
 		}
 
@@ -283,24 +284,24 @@ func startChunkWorker(chunks <-chan Chunk, wg *sync.WaitGroup, mapper *DBMapper,
 }
 
 // processRowFromChunk processes a data row from a chunk
-func processRowFromChunk(mapper *DBMapper, inputLine, schemaName, tableName string, columnNames []string, inclusive bool) string {
-	rowVals := strings.Split(inputLine, "\t")
-	outputVals := make([]string, 0, len(rowVals))
+func processRowFromChunk(mapper *DBMapper, inputLine string, chunk Chunk) string {
+	rowValues := strings.Split(inputLine, "\t")
+	outputValues := make([]string, 0, len(rowValues))
 
-	for i, columnName := range columnNames {
+	for i, columnName := range chunk.ColumnNames {
 		var (
 			err        error
 			escapeChar string
 			output     string
 		)
 
-		cmap := mapper.ColumnMapper(schemaName, tableName, columnName)
-		if cmap == nil && inclusive {
+		cmap := mapper.ColumnMapper(chunk.SchemaName, chunk.TableName, columnName)
+		if cmap == nil && chunk.Inclusive {
 			log.Fatalf("Column '%s.%s.%s' does not exist. Please add to Map file",
-				schemaName, tableName, columnName)
+				chunk.SchemaName, chunk.TableName, columnName)
 			os.Exit(1)
 		}
-		val := rowVals[i]
+		val := rowValues[i]
 
 		// Check to see if the column has an escape char at the end of it.
 		// If so cut it and keep it for later
@@ -328,8 +329,8 @@ func processRowFromChunk(mapper *DBMapper, inputLine, schemaName, tableName stri
 		output += escapeChar
 
 		// Append the column to our new line
-		outputVals = append(outputVals, output)
+		outputValues = append(outputValues, output)
 	}
 
-	return strings.Join(outputVals, "\t")
+	return strings.Join(outputValues, "\t")
 }

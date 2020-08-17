@@ -93,36 +93,41 @@ func cliCommandProcess(cmd *cobra.Command, args []string) {
 	log.Info(aurora.Bold(aurora.Yellow(fmt.Sprint("Enabling log level: ",
 		strings.ToUpper(viper.GetString("log-level"))))))
 
-	log.Info("🚜 ", aurora.Bold(aurora.Green("Processing dump file")), " 🚜")
-	err = process(
-		viper.GetString("process.dump-file"),
-		viper.GetString("process.map-file"),
-		viper.GetString("process.processed-file"),
-		viper.GetString("process.pre-process-file"),
-		viper.GetString("process.post-process-file"),
-		viper.GetBool("process.generate-seed"),
-	)
+	log.Info(aurora.Bold(aurora.Green(" Processing dump file ")))
+
+	err = process()
 	if err != nil {
 		log.Error(err)
 		log.Error("❌ Gonymizer did not exit properly. See above for errors ❌")
 		os.Exit(1)
 	} else {
-		log.Info("🦄 ", aurora.Bold(aurora.Green("-- SUCCESS --")), " 🌈")
+		log.Info(aurora.Bold(aurora.Green(" -- SUCCESS -- ")))
 	}
 }
 
 // process is the entry point for processing a dump file according to the map file.
-func process(dumpFile, mapFile, processedDumpFile, preProcess, postProcess string, generateSeed bool) (err error) {
+func process() (err error) {
+	mapFile := viper.GetString("process.map-file")
 	log.Info("Loading map file from: ", mapFile)
-	columnMap, err := gonymizer.LoadConfigSkeleton(mapFile)
+	dbMapper, err := gonymizer.NewDBMapperFromFile(mapFile)
 	if err != nil {
 		return err
 	}
 
-	log.Info("Processing dump file: ", dumpFile)
-	inclusive := viper.GetBool("process.inclusive")
-	numWorkers := viper.GetInt("num-workers")
-	err = gonymizer.ProcessConcurrently(columnMap, dumpFile, processedDumpFile, inclusive, generateSeed, numWorkers, preProcess, postProcess)
+	config := gonymizer.ProcessConfig{
+		DBMapper:            dbMapper,
+		SourceFilename:      viper.GetString("process.dump-file"),
+		DestinationFilename: viper.GetString("process.processed-file"),
+		MapFilename:         viper.GetString("process.map-file"),
+		Inclusive:           viper.GetBool("process.inclusive"),
+		GenerateSeed:        viper.GetBool("process.generate-seed"),
+		NumWorkers:          viper.GetInt("num-workers"),
+		PreprocessFilename:  viper.GetString("process.pre-process-file"),
+		PostprocessFilename: viper.GetString("process.post-process-file"),
+	}
+	
+	log.Info("Processing dump file: ", config.SourceFilename)
+	err = gonymizer.ProcessConcurrently(config)
 	if err != nil {
 		return err
 	}
